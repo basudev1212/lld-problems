@@ -1,6 +1,7 @@
 package atm.chainofresponsibility;
 
 public interface CashDispenseHandler {
-    int handleRequest(int amount);
     void setNextLevel(CashDispenseHandler next);
+    void dispense(int amount);
+    boolean canDispense(int amount);
 }

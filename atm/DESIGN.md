@@ -30,21 +30,11 @@ classDiagram
     class ATM {
         <<singleton>>
         -static ATM instance
-        -String atmId
-        -String location
-        -CashDispenser cashDispenser
         -BankingService bankingService
-        +static getInstance(...) ATM
-        +getCashDispenser() CashDispenser
+        -CashDispenser cashDispenser
+        +static getInstance() ATM
         +getBankingService() BankingService
-    }
-
-    class CashDispenser {
-        -Map~Integer,Integer~ denominationCounts
-        -DenominationStrategy strategy
-        +loadCash(int denomination, int count) void
-        +dispense(int amount) boolean
-        -buildChain() CashDispenseHandler
+        +getCashDispenser() CashDispenser
     }
 
     class BankingService {
@@ -57,32 +47,26 @@ classDiagram
         +credit(Account, double) void
     }
 
-    class DenominationStrategy {
-        <<interface>>
-        +getDenominationOrder(Set~Integer~) List~Integer~
-    }
-
-    class LowerDenominationFirst {
-        +getDenominationOrder(Set~Integer~) List~Integer~
-    }
-
-    class HigherDenominationFirst {
-        +getDenominationOrder(Set~Integer~) List~Integer~
+    class CashDispenser {
+        -CashDispenseHandler chain
+        +canDispense(int amount) boolean
+        +dispense(int amount) void
     }
 
     class CashDispenseHandler {
         <<interface>>
-        +handleRequest(int amount) int
         +setNextLevel(CashDispenseHandler) void
+        +dispense(int amount) void
+        +canDispense(int amount) boolean
     }
 
     class AbstractCashHandler {
         <<abstract>>
         -int denomination
-        -Map~Integer,Integer~ denominationCounts
+        -int availableCount
         -CashDispenseHandler next
-        +handleRequest(int amount) int
-        +setNextLevel(CashDispenseHandler) void
+        +dispense(int amount) void
+        +canDispense(int amount) boolean
     }
 
     class FiveHundredCashHandler
@@ -93,7 +77,7 @@ classDiagram
         <<interface>>
         +insertCard(ATMSystem, Card) void
         +enterPIN(ATMSystem, String) void
-        +selectOperation(ATMSystem, OperationType) void
+        +selectOperation(ATMSystem, OperationType, int) void
         +ejectCard(ATMSystem) void
     }
 
@@ -108,17 +92,15 @@ classDiagram
         -Account currentAccount
         +insertCard(Card) void
         +enterPIN(String) void
-        +selectOperation(OperationType) void
+        +selectOperation(OperationType, int) void
+        +withdraw(int amount) void
+        +deposit(int amount) void
         +ejectCard() void
-        +setState(ATMState) void
     }
 
     class ATMApplication {
         +main(String[] args) void
     }
-
-    DenominationStrategy <|.. LowerDenominationFirst
-    DenominationStrategy <|.. HigherDenominationFirst
 
     CashDispenseHandler <|.. AbstractCashHandler
     AbstractCashHandler <|-- FiveHundredCashHandler
@@ -126,15 +108,13 @@ classDiagram
     AbstractCashHandler <|-- HundredCashHandler
     AbstractCashHandler --> CashDispenseHandler : next
 
-    CashDispenser --> DenominationStrategy : uses
-    CashDispenser ..> CashDispenseHandler : builds chain
-    CashDispenser --> ATM
+    CashDispenser --> CashDispenseHandler : chain head
 
     BankingService --> Account : reads/writes
     BankingService --> Card : looks up
 
-    ATM --> CashDispenser
-    ATM --> BankingService
+    ATM --> CashDispenser : owns
+    ATM --> BankingService : owns
 
     ATMState <|.. IdleState
     ATMState <|.. CardInsertedState
@@ -154,80 +134,83 @@ classDiagram
     ATMState ..> OperationType
 ```
 
-## Session Flow (Sequence)
+## Withdrawal Flow (Sequence)
 
 ```mermaid
 sequenceDiagram
-    participant App as ATMApplication
+    participant State as AuthenticatedState
     participant Sys as ATMSystem
-    participant State as ATMState (Idle/CardInserted/Authenticated)
-    participant Bank as BankingService
     participant Dispenser as CashDispenser
+    participant Bank as BankingService
 
-    App->>Sys: insertCard(card)
-    Sys->>State: insertCard(sys, card)
-    Note over State: IdleState -> CardInsertedState
+    State->>Sys: withdraw(amount)
+    Sys->>Dispenser: canDispense(amount)
+    Dispenser-->>Sys: false
+    Sys-->>State: throws IllegalStateException("Insufficient cash...")
 
-    App->>Sys: enterPIN(pin)
-    Sys->>State: enterPIN(sys, pin)
-    State->>Bank: getAccount(card)
-    State->>Bank: validatePin(account, pin)
-    Bank-->>State: true / false
-    Note over State: CardInsertedState -> AuthenticatedState (if valid)
+    Note over Sys,Dispenser: --- happy path ---
+    Sys->>Dispenser: canDispense(amount)
+    Dispenser-->>Sys: true
+    Sys->>Bank: debit(account, amount)
+    Sys->>Dispenser: dispense(amount)
+    Dispenser-->>Sys: ok
 
-    App->>Sys: selectOperation(CHECK_BALANCE)
-    Sys->>State: selectOperation(sys, type)
-    State->>Bank: getBalance(account)
-    Bank-->>State: balance
-
-    App->>Sys: ejectCard()
-    Sys->>State: ejectCard(sys)
-    Note over State: any state -> IdleState
+    Note over Sys,Bank: --- rare race: dispense fails after debit ---
+    Sys->>Bank: debit(account, amount)
+    Sys->>Dispenser: dispense(amount)
+    Dispenser-->>Sys: throws
+    Sys->>Bank: credit(account, amount)
+    Sys-->>State: throws IllegalStateException("Could not dispense...")
 ```
 
 ## Key Design Decisions
 
-1. **Singleton** — `ATM` represents the single physical machine the application
-   models, so it exposes a static `getInstance(...)` instead of a public constructor.
-   The first call wires in its `CashDispenser` and `BankingService`; every later call
-   (including the no-arg `getInstance()`) returns that same instance.
+1. **No-arg Singleton — `ATM` builds its own dependencies.** Earlier this took
+   `getInstance(atmId, location, cashDispenser, bankingService)`, which silently
+   discarded those arguments on every call after the first — call it out of order
+   and you'd get a fully-formed-looking but wrongly-wired `ATM` with no error.
+   `ATM`'s private constructor now builds its own `BankingService` and wires its own
+   `CashDispenser` chain internally, so `getInstance()` takes no arguments at all —
+   there's no "first call is special" case to get wrong.
 
-2. **Service layer, separate from data models** — `CashDispenser` and `BankingService`
-   live in `atm.service` because they hold *behavior* (dispensing cash, validating a
-   PIN, debiting/crediting an account), not just data. `atm.model` is left with plain
-   entities (`Card`, `Account`) plus `ATM`, which is really a composition root/facade
-   over the two services rather than a data record itself.
+2. **Withdraw is debit-then-dispense, not dispense-then-debit.** `ATMSystem.withdraw`
+   calls `cashDispenser.canDispense(amount)` as a read-only pre-check, then
+   `bankingService.debit(...)` **before** `cashDispenser.dispense(...)`. This order
+   matters: if `dispense()` unexpectedly fails *after* a successful debit, the fix is
+   just `bankingService.credit(...)` — a cheap, reliable ledger correction. The
+   reverse order (dispense first) would mean a failure after a successful dispense
+   leaves cash physically gone with no compensating action possible. This is a
+   compensating-transaction, not a true cross-system transaction — `BankingService`
+   and `CashDispenser` are independent resources with no shared commit protocol,
+   which is the honest constraint here.
 
-3. **State Pattern** — `ATMSystem` is the context; `ATMState` implementations
-   (`IdleState`, `CardInsertedState`, `AuthenticatedState`) each decide which of the
-   four actions are legal and drive the transition to the next state. Invalid actions
-   for a state (e.g. entering a PIN with no card inserted) throw immediately instead
-   of silently no-oping.
+3. **Chain of Responsibility, fixed order, no Strategy layer.** Each
+   `AbstractCashHandler` holds its own `denomination` + `availableCount` and is wired
+   to the next handler once, at `ATM` construction (500 → 200 → 100). `canDispense`
+   is a read-only mirror of `dispense` that walks the same chain without mutating
+   counts, so it can be used as a pre-check. An earlier version added a
+   `DenominationStrategy` (`Lower`/`HigherDenominationFirst`) to pick the order
+   dynamically and rebuilt the chain from a `Map` on every call — removed, since the
+   order never actually needs to change at runtime for this problem, and a fixed
+   chain built once is simpler and just as correct.
 
-4. **Strategy + Chain of Responsibility, split by responsibility** — `CashDispenser`
-   asks its `DenominationStrategy` **which order** to try denominations in
-   (`LowerDenominationFirst` vs `HigherDenominationFirst`), then links
-   `CashDispenseHandler`s in that order. Each handler only knows **how to serve its
-   own denomination** and pass the remainder down the chain — so the ordering policy
-   and the per-denomination dispensing math stay independent and swappable.
+4. **`BankingService` seeds its own demo data.** Its constructor links one demo
+   card/account, so `ATM`/`ATMSystem`/`ATMApplication` don't need to wire that up
+   externally — `linkCardToAccount` stays public for adding more.
 
-5. **`AbstractCashHandler` removes boilerplate** — `FiveHundredCashHandler`,
-   `TwoHundredCashHandler`, `HundredCashHandler` are now three-line subclasses that
-   just fix a denomination; the shared notes-needed/available/remainder math and the
-   `next` pointer live once in the abstract base.
+5. **State Pattern** — `ATMSystem` is the context; `IdleState`, `CardInsertedState`,
+   `AuthenticatedState` each decide which actions are legal and drive the transition
+   to the next state, throwing immediately on invalid actions instead of
+   silently no-oping.
 
-6. **`BankingService` is a concrete class, not an interface** — it implements the
-   basic steps directly (in-memory `Map<cardNumber, Account>`, PIN check, balance
-   debit/credit) rather than being an abstraction over multiple backends. If a real
-   backend integration is ever needed, this class is the natural seam to extract an
-   interface from later — no need to design for it up front.
+6. **Service layer, separate from data models** — `CashDispenser` and
+   `BankingService` live in `atm.service` because they hold behavior; `atm.model`
+   holds plain entities (`Card`, `Account`) plus `ATM`, which composes the two
+   services rather than being a data record itself.
 
-7. **Known gap, deliberately deferred** — `ATMState.selectOperation` doesn't carry an
-   amount, so `DEPOSIT_CASH`/`WITHDRAW_CASH` currently throw
-   `UnsupportedOperationException`. `CHECK_BALANCE` needs no amount, so it's fully
-   wired. Also, `CashDispenser.dispense` mutates denomination counts as it walks the
-   chain with no rollback if the full amount can't be served — worth a two-pass
-   check (can-fulfill, then commit) before wiring up real withdrawals.
+7. **`ATM` and `CashDispenser` point one way.** `ATM` owns a `CashDispenser`;
+   `CashDispenser` has no reference back to `ATM`, and never needs one — it only
+   needs its handler chain.
 
 ## How to Run
 

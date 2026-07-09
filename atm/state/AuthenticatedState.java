@@ -2,10 +2,7 @@ package atm.state;
 
 import atm.ATMSystem;
 import atm.enums.OperationType;
-import atm.exception.InsufficientCashException;
-import atm.model.Account;
 import atm.model.Card;
-import atm.service.BankingService;
 
 public class AuthenticatedState implements ATMState {
 
@@ -27,33 +24,20 @@ public class AuthenticatedState implements ATMState {
                 System.out.println("Available balance: " + balance);
                 break;
             case WITHDRAW_CASH:
-                withdrawCash(atmSystem, amount);
+                try {
+                    atmSystem.withdraw(amount);
+                    System.out.println("Please collect your cash: " + amount);
+                } catch (IllegalStateException e) {
+                    System.out.println("Withdrawal failed: " + e.getMessage());
+                }
                 break;
             case DEPOSIT_CASH:
-                throw new UnsupportedOperationException("Not supported yet.");
+                atmSystem.deposit(amount);
+                System.out.println("Deposited: " + amount);
+                break;
             default:
                 throw new IllegalArgumentException("Unknown operation: " + operationType);
         }
-    }
-
-    private void withdrawCash(ATMSystem atmSystem, int amount) {
-        Account account = atmSystem.getCurrentAccount();
-        BankingService bankingService = atmSystem.getAtm().getBankingService();
-
-        if (bankingService.getBalance(account) < amount) {
-            System.out.println("Insufficient balance in account.");
-            return;
-        }
-
-        try {
-            atmSystem.getAtm().getCashDispenser().dispense(amount);
-        } catch (InsufficientCashException e) {
-            System.out.println("Insufficient funds: " + e.getMessage());
-            return;
-        }
-
-        bankingService.debit(account, amount);
-        System.out.println("Please collect your cash: " + amount);
     }
 
     @Override

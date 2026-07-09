@@ -1,55 +1,45 @@
 package atm.model;
 
+import atm.chainofresponsibility.CashDispenseHandler;
+import atm.chainofresponsibility.FiveHundredCashHandler;
+import atm.chainofresponsibility.HundredCashHandler;
+import atm.chainofresponsibility.TwoHundredCashHandler;
 import atm.service.BankingService;
 import atm.service.CashDispenser;
 
 public class ATM {
 
-    private static volatile ATM instance;
+    private static ATM instance;
 
-    private final String atmId;
-    private final String location;
-    private final CashDispenser cashDispenser;
     private final BankingService bankingService;
+    private final CashDispenser cashDispenser;
 
-    private ATM(String atmId, String location, CashDispenser cashDispenser, BankingService bankingService) {
-        this.atmId = atmId;
-        this.location = location;
-        this.cashDispenser = cashDispenser;
-        this.bankingService = bankingService;
+    // No constructor args: the single instance builds its own dependencies,
+    // so there's no "first call vs. every call after" asymmetry to get wrong.
+    private ATM() {
+        this.bankingService = new BankingService();
+
+        CashDispenseHandler fiveHundred = new FiveHundredCashHandler(2);
+        CashDispenseHandler twoHundred = new TwoHundredCashHandler(2);
+        CashDispenseHandler hundred = new HundredCashHandler(5);
+        fiveHundred.setNextLevel(twoHundred);
+        twoHundred.setNextLevel(hundred);
+
+        this.cashDispenser = new CashDispenser(fiveHundred);
     }
 
-    public static ATM getInstance(String atmId, String location, CashDispenser cashDispenser, BankingService bankingService) {
+    public static synchronized ATM getInstance() {
         if (instance == null) {
-            synchronized (ATM.class) {
-                if (instance == null) {
-                    instance = new ATM(atmId, location, cashDispenser, bankingService);
-                }
-            }
+            instance = new ATM();
         }
         return instance;
-    }
-
-    public static ATM getInstance() {
-        if (instance == null) {
-            throw new IllegalStateException("ATM has not been initialized yet. Call getInstance(atmId, location, cashDispenser, bankingService) first.");
-        }
-        return instance;
-    }
-
-    public String getAtmId() {
-        return atmId;
-    }
-
-    public String getLocation() {
-        return location;
-    }
-
-    public CashDispenser getCashDispenser() {
-        return cashDispenser;
     }
 
     public BankingService getBankingService() {
         return bankingService;
+    }
+
+    public CashDispenser getCashDispenser() {
+        return cashDispenser;
     }
 }

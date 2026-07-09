@@ -10,6 +10,12 @@ public class BankingService {
 
     private final Map<String, Account> accountByCardNumber = new HashMap<>();
 
+    public BankingService() {
+        Card demoCard = new Card("1234-5678-9012-3456", "12/29", "123");
+        Account demoAccount = new Account("ACC-001", "Jane Doe", "4321", 5000);
+        linkCardToAccount(demoCard, demoAccount);
+    }
+
     public void linkCardToAccount(Card card, Account account) {
         accountByCardNumber.put(card.getCardNumber(), account);
     }

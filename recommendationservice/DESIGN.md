@@ -1,240 +1,297 @@
 # Recommendation Service — Design
 
-A generic, item-agnostic recommendation service. It can recommend videos, songs,
-products, articles, or anything else — the design never hard-codes a domain.
+A generic design for a system that recommends **items** to **users**.
+The items can be anything — videos, songs, products, articles. This design does not
+care what the item actually is.
 
 ---
 
-## Table of Contents
+## 1. The Problem in Plain English
 
-1. [What Is a Recommendation Service?](#what-is-a-recommendation-service)
-2. [Step-by-Step Interview Guide](#step-by-step-interview-guide)
-3. [High-Level Architecture](#high-level-architecture)
-4. [Component Reference](#component-reference)
-5. [Class Diagram](#class-diagram)
-6. [Sequence Diagrams](#sequence-diagrams)
-7. [Reference Java (Plain, No Lambdas)](#reference-java-plain-no-lambdas)
-8. [Key Design Decisions](#key-design-decisions)
-9. [Package Layout (For Your Implementation)](#package-layout-for-your-implementation)
-10. [How to Run (After You Implement)](#how-to-run-after-you-implement)
+Imagine a store with millions of products and millions of customers. A user opens the
+app and sees a "Recommended for you" section.
 
----
+The system must answer:
 
-## What Is a Recommendation Service?
+> **Who is this user, and which items should we show them — in what order?**
 
-A recommendation service answers one question:
+That is the entire job of a recommendation service.
 
-> **"Given this user and this context, which items should we show next?"**
+It does **not**:
+- Store the full product catalog (another service does that)
+- Handle login or payments
+- Train machine-learning models (out of scope for this LLD)
 
-It does **not** own the full product catalog or user accounts. It **reads** from other
-services, runs a **pipeline**, and returns a ranked list of items.
-
-### Real-world analogy
-
-Think of a shop assistant:
-
-1. **Know the customer** — what they bought before, what they like.
-2. **Gather options** — walk the aisles and pick candidates (not every item in the store).
-3. **Remove bad options** — out of stock, already bought today, blocked brand.
-4. **Rank what's left** — put the best matches on top.
-5. **Explain (optional)** — "Because you liked X."
-
-Our LLD models exactly those five steps.
+It **does**:
+- Read user history and item data from other services
+- Pick a short list of good items
+- Return them sorted best-first
 
 ---
 
-## Step-by-Step Interview Guide
+## 2. The Big Picture (Read This First)
 
-Use this order in a 45–60 minute LLD round.
-
-### Step 1 — Clarify requirements (5 min)
-
-Say out loud:
-
-| Topic | Assumption for this design |
-|-------|---------------------------|
-| Input | `userId`, optional `category`, `limit` (how many results) |
-| Output | Ordered list of `Item` with a `score` and optional `reason` |
-| Item type | Generic — one `Item` class with `id`, `title`, `category`, `tags` |
-| Algorithms | Support multiple strategies; default is a simple **hybrid** |
-| Events | Users generate `VIEW`, `LIKE`, `PURCHASE` events we can learn from |
-| Scale (mention) | Cache hot users; retrievers read from in-memory maps for the LLD demo |
-| Out of scope | ML model training, distributed search, A/B testing infra |
-
-### Step 2 — Name the core entities (5 min)
-
-Draw four boxes first:
-
-- **User** — who is asking
-- **Item** — what we recommend
-- **UserEvent** — what the user did in the past (view, like, purchase)
-- **RecommendationRequest / RecommendationResponse** — API contract
-
-Interview tip: *entities are nouns; services are verbs.*
-
-### Step 3 — Draw the pipeline (10 min)
-
-Every recommender follows the same stages:
+Every recommendation request goes through the same three steps:
 
 ```
-Request → [Retrieve candidates] → [Filter] → [Rank] → Response
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌──────────────┐
+│   REQUEST   │ ──▶ │  RETRIEVE   │ ──▶ │   FILTER    │ ──▶ │     RANK     │ ──▶ RESPONSE
+│  who + how  │     │ gather many │     │ remove bad  │     │ sort best    │
+│  many items │     │  candidates │     │    ones     │     │   first      │
+└─────────────┘     └─────────────┘     └─────────────┘     └──────────────┘
 ```
 
-- **Retrieve** — cast a wide net (maybe 100 items).
-- **Filter** — remove illegal/irrelevant ones (maybe down to 40).
-- **Rank** — score and sort (return top 10).
+**Example with numbers:**
 
-This pipeline is the **heart** of the design. Most follow-up questions are about
-one of these three stages.
+| Step | What happens | Count |
+|------|--------------|-------|
+| Request | User U1 wants 10 items | — |
+| Retrieve | Pull 100 possible items from catalog + user history | 100 |
+| Filter | Remove items user already bought or blocked | 60 left |
+| Rank | Score each item, sort high to low, take top 10 | 10 returned |
 
-### Step 4 — Introduce pluggable strategies (10 min)
+Think of it like hiring:
+1. **Retrieve** = collect 100 resumes (cast a wide net)
+2. **Filter** = remove unqualified candidates
+3. **Rank** = interview the rest and pick the top 10
 
-- **Recommender** (Strategy) — `PopularRecommender`, `ContentBasedRecommender`,
-  `HybridRecommender`.
-- **CandidateRetriever** — where candidates come from.
-- **RecommendationFilter** — rules to exclude items.
-- **Ranker** — how to score and sort.
-
-`RecommendationService` picks a strategy (or uses hybrid) and delegates.
-
-### Step 5 — Supporting services (5 min)
-
-- **CatalogService** — read item metadata.
-- **UserProfileService** — read user preferences + event history.
-- **EventIngestionService** — write new events (feeds the profile over time).
-- **RecommendationCache** — optional speed layer.
-
-### Step 6 — Walk one sequence diagram (5 min)
-
-Trace: `Client → RecommendationService → Recommender → Retriever/Filter/Ranker → Response`.
-
-### Step 7 — Non-functional talking points (5 min)
-
-Mention even if you do not code them:
-
-- **Cold start** — new user with no history → fall back to `PopularRecommender`.
-- **Cache** — key = `userId + category + limit`; TTL 5 minutes.
-- **Idempotency** — same request should not mutate state.
-- **Observability** — log retrieval count, filter drop count, latency per stage.
-
-### Step 8 — Trade-offs / extensions (5 min)
-
-- Add `RecommenderFactory` for new algorithms without touching the service.
-- Add `ABTestRouter` to route 10% traffic to a new ranker (extension).
-- Replace in-memory maps with Redis + Elasticsearch in production.
+This three-step pipeline is the most important idea in the whole design.
 
 ---
 
-## High-Level Architecture
+## 3. Two Separate Flows
+
+The system has two jobs that should stay separate:
+
+### Flow A — Get recommendations (READ)
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     RecommendationService                        │
-│  (facade: cache check → pick recommender → return response)     │
-└────────────┬────────────────────────────────────────────────────┘
-             │
-             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│              Recommender  (Strategy interface)                   │
-│   Popular │ ContentBased │ Collaborative │ Hybrid               │
-└────────────┬────────────────────────────────────────────────────┘
-             │  each recommender runs the same 3-stage pipeline:
-             ▼
-   ┌──────────────────┐   ┌──────────────────┐   ┌──────────────┐
-   │ CandidateRetriever│ → │ Filter chain     │ → │ Ranker       │
-   └────────┬─────────┘   └──────────────────┘   └──────────────┘
-            │
-            ▼
-   ┌────────────────┐     ┌─────────────────────┐
-   │ CatalogService │     │ UserProfileService   │
-   └────────────────┘     └─────────────────────┘
+Client  →  RecommendationService  →  Recommender  →  Response
+```
+
+The client asks "what should I show user U1?" and gets back a sorted list.
+This path **never changes** user data.
+
+### Flow B — Record what the user did (WRITE)
+
+```
+Client  →  EventIngestionService  →  UserProfileService
+```
+
+When a user views, likes, or purchases an item, that event is saved.
+Later recommendations become more accurate because the system knows more about the user.
+
+```
+         ┌──────────────────────────────────────┐
+         │         READ PATH (Flow A)          │
+         │  getRecommendations(userId, limit)  │
+         └──────────────────────────────────────┘
+
+         ┌──────────────────────────────────────┐
+         │         WRITE PATH (Flow B)          │
+         │  recordEvent(userId, itemId, type)  │
+         └──────────────────────────────────────┘
+                        │
+                        ▼
+              UserProfileService stores history
+                        │
+                        ▼
+              Future READ requests use that history
+```
+
+---
+
+## 4. All Components Explained
+
+### Layer 1 — Data (what we store)
+
+These are plain objects with fields. No business logic.
+
+| Component | What it represents | Key fields |
+|-----------|-------------------|------------|
+| **Item** | One thing we can recommend | id, title, category, tags, popularityScore |
+| **User** | One person asking for recommendations | userId, preferredCategories |
+| **UserEvent** | One action the user took in the past | userId, itemId, eventType, timestamp |
+| **EventType** | Kind of action | VIEW, LIKE, PURCHASE |
+| **RecommendationRequest** | What the client asks for | userId, category (optional), limit |
+| **RecommendationResponse** | What we send back | list of scored items, which algorithm was used |
+| **ScoredItem** | One item in the final answer | item, score, reason (optional text) |
+
+**Why UserEvent matters:** Without history, every user gets the same "popular items"
+list. Events are how the system learns preferences over time.
+
+---
+
+### Layer 2 — Data services (where data lives)
+
+These classes **hold and serve data**. They do not decide what to recommend.
+
+| Component | Responsibility |
+|-----------|----------------|
+| **CatalogService** | Stores all items. Can look up by id or category. |
+| **UserProfileService** | Stores users, their preferences, and their event history. |
+| **EventIngestionService** | The only entry point for saving new events. Validates and forwards to UserProfileService. |
+
+```
+CatalogService          UserProfileService
+     │                         │
+     │  items                  │  users + events
+     │                         │
+     └──────────┬──────────────┘
+                │
+         read by retrievers,
+         filters, and rankers
+```
+
+---
+
+### Layer 3 — The pipeline (how recommendations are built)
+
+These three interfaces are the core of every recommendation algorithm.
+
+#### CandidateRetriever — Step 1: Gather options
+
+**Job:** Return a large list of items that *might* be good. Order does not matter yet.
+
+| Implementation | Where candidates come from |
+|----------------|---------------------------|
+| **PopularItemsRetriever** | Globally popular items from the catalog |
+| **UserHistoryRetriever** | Items similar to what this user liked before |
+| **CategoryBasedRetriever** | Items in categories the user prefers |
+
+You can have multiple retrievers. A hybrid approach runs two retrievers and merges
+their results (removing duplicates).
+
+#### RecommendationFilter — Step 2: Remove bad options
+
+**Job:** Take the candidate list and remove items that should never be shown.
+
+| Implementation | What it removes |
+|----------------|-----------------|
+| **AlreadySeenFilter** | Items the user already purchased |
+| **BlocklistFilter** | Items the user explicitly blocked |
+
+Filters only remove items. They never add new ones or change scores.
+
+#### Ranker — Step 3: Score and sort
+
+**Job:** Give every remaining item a number (score), sort highest first.
+
+| Implementation | How score is calculated |
+|----------------|------------------------|
+| **PopularityRanker** | Score = item's global popularity |
+| **WeightedFeatureRanker** | Score = mix of popularity + category match + tag overlap |
+
+The top N items (where N = limit from the request) become the final answer.
+
+---
+
+### Layer 4 — Recommenders (different strategies)
+
+A **Recommender** wires together one retriever (or more), one filter, and one ranker,
+then runs the three-step pipeline.
+
+All recommenders share the same interface: input = request, output = response.
+
+| Recommender | When to use | Pipeline |
+|-------------|-------------|----------|
+| **PopularRecommender** | New user with no history ("cold start") | Popular retriever → filter → popularity ranker |
+| **ContentBasedRecommender** | User has enough history | Category/history retriever → filter → weighted ranker |
+| **HybridRecommender** | User has some but not much history | Two retrievers merged → filter → weighted ranker |
+
+**Cold start problem:** A brand-new user has no events. You cannot personalize yet.
+The system falls back to PopularRecommender — show what everyone else likes.
+
+```
+User history empty?     →  PopularRecommender
+User history small?     →  HybridRecommender
+User history rich?      →  ContentBasedRecommender
+```
+
+---
+
+### Layer 5 — Orchestration (ties everything together)
+
+| Component | Responsibility |
+|-----------|----------------|
+| **RecommendationService** | Public API. Checks cache, picks the right recommender, returns the response. |
+| **RecommenderFactory** | Creates recommender objects with the correct retriever/filter/ranker wired in. |
+| **RecommendationCache** | Stores recent results so the same request does not recompute every time. |
+
+```
+Client
+  │
+  ▼
+RecommendationService
+  ├── check RecommendationCache
+  ├── read User from UserProfileService
+  ├── pick Recommender (popular / content / hybrid)
+  ├── call Recommender.recommend()
+  └── save result in cache
+```
+
+---
+
+## 5. How the Pieces Connect
+
+```
+                    ┌─────────────────────────┐
+                    │  RecommendationService  │
+                    │  (entry point)          │
+                    └───────────┬─────────────┘
+                                │
+              ┌─────────────────┼─────────────────┐
+              ▼                 ▼                 ▼
+     RecommendationCache  RecommenderFactory  UserProfileService
+                                │
+                                ▼
+                    ┌─────────────────────────┐
+                    │      Recommender        │
+                    │  (strategy: pick one)   │
+                    └───────────┬─────────────┘
+                                │
+            ┌───────────────────┼───────────────────┐
+            ▼                   ▼                   ▼
+   CandidateRetriever   RecommendationFilter    Ranker
+            │                   │                   │
+            ▼                   ▼                   ▼
+   CatalogService         UserProfileService   UserProfileService
+   UserProfileService
+
+   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─
 
    EventIngestionService ──writes──▶ UserProfileService
 ```
 
 ---
 
-## Component Reference
-
-### Domain models (`model` package)
-
-| Class | Responsibility |
-|-------|----------------|
-| `Item` | A recommendable thing: `itemId`, `title`, `category`, `tags`, `popularityScore`. |
-| `User` | `userId`, `preferredCategories` (list of strings). |
-| `UserEvent` | One interaction: `userId`, `itemId`, `EventType`, `timestamp`. |
-| `EventType` | Enum: `VIEW`, `LIKE`, `PURCHASE`. |
-| `RecommendationRequest` | Input: `userId`, `category` (nullable), `limit`. |
-| `RecommendationResponse` | Output: `List<ScoredItem>`, `recommenderName` (for debugging). |
-| `ScoredItem` | `Item` + `double score` + `String reason`. |
-
-### Data access services (`service` package)
-
-| Class | Responsibility |
-|-------|----------------|
-| `CatalogService` | `getItem(itemId)`, `getAllItems()`, `getItemsByCategory(category)`. In-memory map for LLD. |
-| `UserProfileService` | `getUser(userId)`, `getEventsForUser(userId)`, `getLikedItemIds(userId)`, `addEvent(event)`. |
-| `EventIngestionService` | Validates and forwards events to `UserProfileService`. Single entry point for writes. |
-
-### Pipeline interfaces (`pipeline` package)
-
-| Class | Responsibility |
-|-------|----------------|
-| `CandidateRetriever` | `List<Item> retrieve(RecommendationRequest request)` — returns a **large** unordered candidate set. |
-| `RecommendationFilter` | `List<Item> filter(RecommendationRequest request, List<Item> candidates)` — removes unwanted items. |
-| `Ranker` | `List<ScoredItem> rank(RecommendationRequest request, List<Item> candidates)` — scores and sorts descending. |
-
-### Concrete retrievers (`retriever` package)
-
-| Class | Responsibility |
-|-------|----------------|
-| `PopularItemsRetriever` | Returns globally popular items from `CatalogService`. |
-| `UserHistoryRetriever` | Items similar to what the user liked or purchased. |
-| `CategoryBasedRetriever` | Items in the user's preferred categories or request category. |
-
-### Concrete filters (`filter` package)
-
-| Class | Responsibility |
-|-------|----------------|
-| `AlreadySeenFilter` | Drops items the user already purchased (or viewed in last N events). |
-| `BlocklistFilter` | Drops items on a per-user block list. |
-
-### Concrete rankers (`ranker` package)
-
-| Class | Responsibility |
-|-------|----------------|
-| `PopularityRanker` | Score = `item.popularityScore`. |
-| `WeightedFeatureRanker` | Score = weighted sum of popularity + category match + tag overlap. |
-
-### Recommenders (`recommender` package) — Strategy pattern
-
-| Class | Responsibility |
-|-------|----------------|
-| `Recommender` | Interface: `RecommendationResponse recommend(RecommendationRequest)`. |
-| `PopularRecommender` | Retrieve popular → filter → rank by popularity. Good for **cold start**. |
-| `ContentBasedRecommender` | Retrieve from user categories/history → filter → weighted rank. |
-| `HybridRecommender` | Runs two retrievers, merges candidates, deduplicates, then filter + rank. |
-
-### Orchestration (`service` + `factory` + `cache`)
-
-| Class | Responsibility |
-|-------|----------------|
-| `RecommenderFactory` | Builds concrete `Recommender` instances with shared dependencies. |
-| `RecommendationCache` | `get(key)` / `put(key, response)` — simple `HashMap` for LLD. |
-| `RecommendationService` | Public API: check cache → choose recommender → store in cache → return. |
-
-### Application entry point
-
-| Class | Responsibility |
-|-------|----------------|
-| `RecommendationApplication` | `main`: seed catalog, seed users/events, call service, print results. |
-
----
-
-## Class Diagram
+## 6. Class Diagram
 
 ```mermaid
 classDiagram
+    direction TB
+
+  %% ── Data models ──
+    class Item {
+        -itemId
+        -title
+        -category
+        -tags
+        -popularityScore
+    }
+
+    class User {
+        -userId
+        -preferredCategories
+    }
+
+    class UserEvent {
+        -userId
+        -itemId
+        -eventType
+        -timestamp
+    }
+
     class EventType {
         <<enumeration>>
         VIEW
@@ -242,123 +299,97 @@ classDiagram
         PURCHASE
     }
 
-    class Item {
-        -String itemId
-        -String title
-        -String category
-        -List~String~ tags
-        -double popularityScore
-    }
-
-    class User {
-        -String userId
-        -List~String~ preferredCategories
-    }
-
-    class UserEvent {
-        -String userId
-        -String itemId
-        -EventType eventType
-        -long timestamp
-    }
-
     class RecommendationRequest {
-        -String userId
-        -String category
-        -int limit
+        -userId
+        -category
+        -limit
     }
 
     class ScoredItem {
-        -Item item
-        -double score
-        -String reason
+        -item
+        -score
+        -reason
     }
 
     class RecommendationResponse {
-        -List~ScoredItem~ items
-        -String recommenderName
+        -items
+        -recommenderName
     }
 
+  %% ── Data services ──
     class CatalogService {
-        -Map~String,Item~ itemById
-        +getItem(String) Item
-        +getAllItems() List~Item~
-        +getItemsByCategory(String) List~Item~
+        +getItem(id)
+        +getAllItems()
+        +getItemsByCategory(category)
     }
 
     class UserProfileService {
-        -Map~String,User~ userById
-        -Map~String,List~UserEvent~~ eventsByUserId
-        +getUser(String) User
-        +getEventsForUser(String) List~UserEvent~
-        +getLikedItemIds(String) List~String~
-        +addEvent(UserEvent) void
+        +getUser(userId)
+        +getEventsForUser(userId)
+        +addEvent(event)
     }
 
     class EventIngestionService {
-        -UserProfileService userProfileService
-        +recordEvent(UserEvent) void
+        +recordEvent(event)
     }
 
+  %% ── Pipeline (interfaces) ──
     class CandidateRetriever {
         <<interface>>
-        +retrieve(RecommendationRequest) List~Item~
+        +retrieve(request)
     }
 
+    class RecommendationFilter {
+        <<interface>>
+        +filter(request, candidates)
+    }
+
+    class Ranker {
+        <<interface>>
+        +rank(request, candidates)
+    }
+
+  %% ── Pipeline (implementations) ──
     class PopularItemsRetriever
     class UserHistoryRetriever
     class CategoryBasedRetriever
 
-    class RecommendationFilter {
-        <<interface>>
-        +filter(RecommendationRequest, List~Item~) List~Item~
-    }
-
     class AlreadySeenFilter
     class BlocklistFilter
-
-    class Ranker {
-        <<interface>>
-        +rank(RecommendationRequest, List~Item~) List~ScoredItem~
-    }
 
     class PopularityRanker
     class WeightedFeatureRanker
 
+  %% ── Recommenders ──
     class Recommender {
         <<interface>>
-        +recommend(RecommendationRequest) RecommendationResponse
+        +recommend(request)
     }
 
     class PopularRecommender
     class ContentBasedRecommender
     class HybridRecommender
 
+  %% ── Orchestration ──
     class RecommenderFactory {
-        +createPopularRecommender() Recommender
-        +createContentBasedRecommender() Recommender
-        +createHybridRecommender() Recommender
+        +createPopularRecommender()
+        +createContentBasedRecommender()
+        +createHybridRecommender()
     }
 
     class RecommendationCache {
-        -Map~String,RecommendationResponse~ cache
-        +get(String) RecommendationResponse
-        +put(String, RecommendationResponse) void
+        +get(key)
+        +put(key, response)
     }
 
     class RecommendationService {
-        -CatalogService catalogService
-        -UserProfileService userProfileService
-        -RecommenderFactory recommenderFactory
-        -RecommendationCache cache
-        +getRecommendations(RecommendationRequest) RecommendationResponse
-        -buildCacheKey(RecommendationRequest) String
-        -selectRecommender(User) Recommender
+        +getRecommendations(request)
     }
 
-    class RecommendationApplication {
-        +main(String[] args) void
-    }
+    class RecommendationApplication
+
+  %% ── Relationships ──
+    UserEvent --> EventType
 
     CandidateRetriever <|.. PopularItemsRetriever
     CandidateRetriever <|.. UserHistoryRetriever
@@ -394,26 +425,24 @@ classDiagram
 
     AlreadySeenFilter --> UserProfileService
     BlocklistFilter --> UserProfileService
-
     WeightedFeatureRanker --> UserProfileService
 
-    RecommenderFactory ..> Recommender : creates
+    EventIngestionService --> UserProfileService
+
+    RecommenderFactory ..> Recommender
     RecommendationService --> RecommendationCache
     RecommendationService --> RecommenderFactory
     RecommendationService --> UserProfileService
 
-    EventIngestionService --> UserProfileService
-
     RecommendationApplication --> RecommendationService
     RecommendationApplication --> EventIngestionService
-    RecommendationApplication --> CatalogService
 ```
 
 ---
 
-## Sequence Diagrams
+## 7. Sequence Diagrams
 
-### 1. Get Recommendations (main read path)
+### 7a. Get recommendations
 
 ```mermaid
 sequenceDiagram
@@ -421,48 +450,42 @@ sequenceDiagram
     participant RS as RecommendationService
     participant Cache as RecommendationCache
     participant UPS as UserProfileService
-    participant Factory as RecommenderFactory
-    participant Rec as Recommender (Hybrid/Popular/Content)
+    participant Rec as Recommender
     participant Ret as CandidateRetriever
     participant Fil as RecommendationFilter
     participant Rank as Ranker
 
     Client->>RS: getRecommendations(request)
-    RS->>RS: buildCacheKey(request)
+
     RS->>Cache: get(cacheKey)
-    alt cache hit
-        Cache-->>RS: cached response
-        RS-->>Client: RecommendationResponse
-    else cache miss
-        Cache-->>RS: null
+    alt already cached
+        Cache-->>RS: previous response
+        RS-->>Client: return cached list
+    else not cached
+        Cache-->>RS: nothing found
         RS->>UPS: getUser(userId)
-        UPS-->>RS: User
-        RS->>RS: selectRecommender(user)
-        RS->>Factory: createHybridRecommender() / etc.
-        Factory-->>RS: Recommender
+        UPS-->>RS: user + history
+        RS->>RS: choose recommender based on history
         RS->>Rec: recommend(request)
 
-        Note over Rec,Ret: Stage 1 - Retrieve (wide net)
         Rec->>Ret: retrieve(request)
-        Ret-->>Rec: List<Item> candidates (e.g. 50)
+        Ret-->>Rec: ~100 candidates
 
-        Note over Rec,Fil: Stage 2 - Filter
         Rec->>Fil: filter(request, candidates)
-        Fil-->>Rec: List<Item> filtered (e.g. 30)
+        Fil-->>Rec: ~60 after removing bad items
 
-        Note over Rec,Rank: Stage 3 - Rank
         Rec->>Rank: rank(request, filtered)
-        Rank-->>Rec: List<ScoredItem> ranked
+        Rank-->>Rec: sorted list with scores
 
-        Rec->>Rec: trim to request.limit
-        Rec-->>RS: RecommendationResponse
+        Rec->>Rec: keep top N items
+        Rec-->>RS: response
 
-        RS->>Cache: put(cacheKey, response)
-        RS-->>Client: RecommendationResponse
+        RS->>Cache: save response
+        RS-->>Client: return list
     end
 ```
 
-### 2. Record User Event (write path)
+### 7b. Record a user event
 
 ```mermaid
 sequenceDiagram
@@ -472,520 +495,113 @@ sequenceDiagram
     participant RS as RecommendationService
     participant Cache as RecommendationCache
 
-    Client->>EIS: recordEvent(userEvent)
-    EIS->>EIS: validate event (non-null ids, known EventType)
-    EIS->>UPS: addEvent(userEvent)
-    UPS-->>EIS: ok
+    Client->>EIS: recordEvent(userId, itemId, LIKE)
+    EIS->>EIS: validate
+    EIS->>UPS: addEvent(...)
+    UPS-->>EIS: saved
     EIS-->>Client: ok
 
-    Note over Client,Cache: Optional - invalidate stale recommendations
-    Client->>RS: invalidateCacheForUser(userId)
+    Note over Client,Cache: Clear old recommendations for this user
+    Client->>RS: invalidateCache(userId)
     RS->>Cache: remove entries for userId
 ```
 
 ---
 
-## Reference Java (Plain, No Lambdas)
+## 8. Worked Example
 
-These snippets show **how each layer looks**. Copy and adapt when you implement.
-No lambdas, no streams — only `for` loops and `if-else`.
+**Setup:**
+- Catalog has items A, B, C, D, E
+- User U1 is new (no events)
+- Request: userId=U1, limit=3
 
-### `Recommender` interface
+**Step 1 — RecommendationService receives request**
 
-```java
-package recommendationservice.recommender;
+Cache is empty. User U1 has no history → choose **PopularRecommender**.
 
-import recommendationservice.model.RecommendationRequest;
-import recommendationservice.model.RecommendationResponse;
+**Step 2 — Retrieve**
 
-public interface Recommender {
-    RecommendationResponse recommend(RecommendationRequest request);
-}
-```
+PopularItemsRetriever returns [A, B, C, D, E] sorted by global popularity.
 
-### `PopularRecommender` — full pipeline in one class
+**Step 3 — Filter**
 
-```java
-package recommendationservice.recommender;
+AlreadySeenFilter: U1 never purchased anything → nothing removed.
+Still [A, B, C, D, E].
 
-import java.util.ArrayList;
-import java.util.List;
-import recommendationservice.filter.RecommendationFilter;
-import recommendationservice.model.Item;
-import recommendationservice.model.RecommendationRequest;
-import recommendationservice.model.RecommendationResponse;
-import recommendationservice.model.ScoredItem;
-import recommendationservice.pipeline.CandidateRetriever;
-import recommendationservice.pipeline.Ranker;
+**Step 4 — Rank**
 
-public class PopularRecommender implements Recommender {
+PopularityRanker scores: A=90, B=80, C=70, D=60, E=50.
+Sorted: [A, B, C, D, E].
 
-    private final CandidateRetriever retriever;
-    private final RecommendationFilter filter;
-    private final Ranker ranker;
+**Step 5 — Trim**
 
-    public PopularRecommender(CandidateRetriever retriever,
-                              RecommendationFilter filter,
-                              Ranker ranker) {
-        this.retriever = retriever;
-        this.filter = filter;
-        this.ranker = ranker;
-    }
+Limit is 3 → return [A, B, C] with scores.
 
-    @Override
-    public RecommendationResponse recommend(RecommendationRequest request) {
-        List<Item> candidates = retriever.retrieve(request);
-        List<Item> filtered = filter.filter(request, candidates);
-        List<ScoredItem> ranked = ranker.rank(request, filtered);
+**Later — U1 likes item C**
 
-        List<ScoredItem> topItems = trimToLimit(ranked, request.getLimit());
+EventIngestionService saves LIKE(C). Cache for U1 is cleared.
 
-        RecommendationResponse response = new RecommendationResponse();
-        response.setRecommenderName("PopularRecommender");
-        response.setItems(topItems);
-        return response;
-    }
+**Next request — U1 asks again**
 
-    private List<ScoredItem> trimToLimit(List<ScoredItem> ranked, int limit) {
-        List<ScoredItem> result = new ArrayList<ScoredItem>();
-        int count = 0;
-        for (int i = 0; i < ranked.size(); i++) {
-            if (count >= limit) {
-                break;
-            }
-            result.add(ranked.get(i));
-            count = count + 1;
-        }
-        return result;
-    }
-}
-```
-
-### `HybridRecommender` — merge candidates from two retrievers
-
-```java
-package recommendationservice.recommender;
-
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import recommendationservice.filter.RecommendationFilter;
-import recommendationservice.model.Item;
-import recommendationservice.model.RecommendationRequest;
-import recommendationservice.model.RecommendationResponse;
-import recommendationservice.model.ScoredItem;
-import recommendationservice.pipeline.CandidateRetriever;
-import recommendationservice.pipeline.Ranker;
-
-public class HybridRecommender implements Recommender {
-
-    private final CandidateRetriever firstRetriever;
-    private final CandidateRetriever secondRetriever;
-    private final RecommendationFilter filter;
-    private final Ranker ranker;
-
-    public HybridRecommender(CandidateRetriever firstRetriever,
-                             CandidateRetriever secondRetriever,
-                             RecommendationFilter filter,
-                             Ranker ranker) {
-        this.firstRetriever = firstRetriever;
-        this.secondRetriever = secondRetriever;
-        this.filter = filter;
-        this.ranker = ranker;
-    }
-
-    @Override
-    public RecommendationResponse recommend(RecommendationRequest request) {
-        List<Item> fromFirst = firstRetriever.retrieve(request);
-        List<Item> fromSecond = secondRetriever.retrieve(request);
-        List<Item> merged = mergeAndDeduplicate(fromFirst, fromSecond);
-
-        List<Item> filtered = filter.filter(request, merged);
-        List<ScoredItem> ranked = ranker.rank(request, filtered);
-        List<ScoredItem> topItems = trimToLimit(ranked, request.getLimit());
-
-        RecommendationResponse response = new RecommendationResponse();
-        response.setRecommenderName("HybridRecommender");
-        response.setItems(topItems);
-        return response;
-    }
-
-    private List<Item> mergeAndDeduplicate(List<Item> first, List<Item> second) {
-        Map<String, Item> itemById = new HashMap<String, Item>();
-
-        for (int i = 0; i < first.size(); i++) {
-            Item item = first.get(i);
-            itemById.put(item.getItemId(), item);
-        }
-        for (int j = 0; j < second.size(); j++) {
-            Item item = second.get(j);
-            if (!itemById.containsKey(item.getItemId())) {
-                itemById.put(item.getItemId(), item);
-            }
-        }
-
-        List<Item> merged = new ArrayList<Item>();
-        for (Item item : itemById.values()) {
-            merged.add(item);
-        }
-        return merged;
-    }
-
-    private List<ScoredItem> trimToLimit(List<ScoredItem> ranked, int limit) {
-        List<ScoredItem> result = new ArrayList<ScoredItem>();
-        int count = 0;
-        for (int i = 0; i < ranked.size(); i++) {
-            if (count >= limit) {
-                break;
-            }
-            result.add(ranked.get(i));
-            count = count + 1;
-        }
-        return result;
-    }
-}
-```
-
-### `AlreadySeenFilter` — drop purchased items
-
-```java
-package recommendationservice.filter;
-
-import java.util.ArrayList;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
-import recommendationservice.model.Item;
-import recommendationservice.model.RecommendationRequest;
-import recommendationservice.model.UserEvent;
-import recommendationservice.model.EventType;
-import recommendationservice.pipeline.RecommendationFilter;
-import recommendationservice.service.UserProfileService;
-
-public class AlreadySeenFilter implements RecommendationFilter {
-
-    private final UserProfileService userProfileService;
-
-    public AlreadySeenFilter(UserProfileService userProfileService) {
-        this.userProfileService = userProfileService;
-    }
-
-    @Override
-    public List<Item> filter(RecommendationRequest request, List<Item> candidates) {
-        List<UserEvent> events = userProfileService.getEventsForUser(request.getUserId());
-        Set<String> purchasedItemIds = new HashSet<String>();
-
-        for (int i = 0; i < events.size(); i++) {
-            UserEvent event = events.get(i);
-            if (event.getEventType() == EventType.PURCHASE) {
-                purchasedItemIds.add(event.getItemId());
-            }
-        }
-
-        List<Item> result = new ArrayList<Item>();
-        for (int j = 0; j < candidates.size(); j++) {
-            Item item = candidates.get(j);
-            if (!purchasedItemIds.contains(item.getItemId())) {
-                result.add(item);
-            }
-        }
-        return result;
-    }
-}
-```
-
-### `WeightedFeatureRanker` — simple scoring formula
-
-```java
-package recommendationservice.ranker;
-
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.List;
-import recommendationservice.model.Item;
-import recommendationservice.model.RecommendationRequest;
-import recommendationservice.model.ScoredItem;
-import recommendationservice.model.User;
-import recommendationservice.pipeline.Ranker;
-import recommendationservice.service.UserProfileService;
-
-public class WeightedFeatureRanker implements Ranker {
-
-    private final UserProfileService userProfileService;
-
-    public WeightedFeatureRanker(UserProfileService userProfileService) {
-        this.userProfileService = userProfileService;
-    }
-
-    @Override
-    public List<ScoredItem> rank(RecommendationRequest request, List<Item> candidates) {
-        User user = userProfileService.getUser(request.getUserId());
-        List<ScoredItem> scoredItems = new ArrayList<ScoredItem>();
-
-        for (int i = 0; i < candidates.size(); i++) {
-            Item item = candidates.get(i);
-            double score = calculateScore(user, item, request);
-            String reason = buildReason(user, item);
-
-            ScoredItem scoredItem = new ScoredItem();
-            scoredItem.setItem(item);
-            scoredItem.setScore(score);
-            scoredItem.setReason(reason);
-            scoredItems.add(scoredItem);
-        }
-
-        Collections.sort(scoredItems, new ScoredItemScoreComparator());
-        return scoredItems;
-    }
-
-    private double calculateScore(User user, Item item, RecommendationRequest request) {
-        double score = 0.0;
-
-        // 50% weight on global popularity
-        score = score + (0.5 * item.getPopularityScore());
-
-        // 30% weight if category matches user preference
-        if (user != null && user.getPreferredCategories() != null) {
-            boolean categoryMatch = false;
-            for (int i = 0; i < user.getPreferredCategories().size(); i++) {
-                String preferred = user.getPreferredCategories().get(i);
-                if (preferred.equals(item.getCategory())) {
-                    categoryMatch = true;
-                    break;
-                }
-            }
-            if (categoryMatch) {
-                score = score + 30.0;
-            }
-        }
-
-        // 20% weight if request asked for this category
-        if (request.getCategory() != null) {
-            if (request.getCategory().equals(item.getCategory())) {
-                score = score + 20.0;
-            }
-        }
-
-        return score;
-    }
-
-    private String buildReason(User user, Item item) {
-        if (user == null) {
-            return "Popular in catalog";
-        }
-        for (int i = 0; i < user.getPreferredCategories().size(); i++) {
-            String preferred = user.getPreferredCategories().get(i);
-            if (preferred.equals(item.getCategory())) {
-                return "Matches your interest in " + preferred;
-            }
-        }
-        return "Popular in catalog";
-    }
-
-    private static class ScoredItemScoreComparator implements Comparator<ScoredItem> {
-        @Override
-        public int compare(ScoredItem left, ScoredItem right) {
-            if (left.getScore() < right.getScore()) {
-                return 1;
-            } else if (left.getScore() > right.getScore()) {
-                return -1;
-            } else {
-                return 0;
-            }
-        }
-    }
-}
-```
-
-### `RecommendationService` — cache + cold-start routing
-
-```java
-package recommendationservice.service;
-
-import recommendationservice.cache.RecommendationCache;
-import recommendationservice.factory.RecommenderFactory;
-import recommendationservice.model.RecommendationRequest;
-import recommendationservice.model.RecommendationResponse;
-import recommendationservice.model.User;
-import recommendationservice.model.UserEvent;
-import recommendationservice.recommender.Recommender;
-
-public class RecommendationService {
-
-    private final UserProfileService userProfileService;
-    private final RecommenderFactory recommenderFactory;
-    private final RecommendationCache cache;
-
-    public RecommendationService(UserProfileService userProfileService,
-                                 RecommenderFactory recommenderFactory,
-                                 RecommendationCache cache) {
-        this.userProfileService = userProfileService;
-        this.recommenderFactory = recommenderFactory;
-        this.cache = cache;
-    }
-
-    public RecommendationResponse getRecommendations(RecommendationRequest request) {
-        String cacheKey = buildCacheKey(request);
-        RecommendationResponse cached = cache.get(cacheKey);
-        if (cached != null) {
-            return cached;
-        }
-
-        User user = userProfileService.getUser(request.getUserId());
-        Recommender recommender = selectRecommender(user);
-        RecommendationResponse response = recommender.recommend(request);
-
-        cache.put(cacheKey, response);
-        return response;
-    }
-
-    private Recommender selectRecommender(User user) {
-        if (user == null) {
-            return recommenderFactory.createPopularRecommender();
-        }
-
-        java.util.List<UserEvent> events = userProfileService.getEventsForUser(user.getUserId());
-        if (events == null || events.isEmpty()) {
-            // Cold start: no history yet
-            return recommenderFactory.createPopularRecommender();
-        }
-
-        if (events.size() < 5) {
-            // Sparse history: blend popularity with light personalization
-            return recommenderFactory.createHybridRecommender();
-        }
-
-        // Enough history: content-based personalization
-        return recommenderFactory.createContentBasedRecommender();
-    }
-
-    private String buildCacheKey(RecommendationRequest request) {
-        String categoryPart = "ALL";
-        if (request.getCategory() != null) {
-            categoryPart = request.getCategory();
-        }
-        return request.getUserId() + "|" + categoryPart + "|" + request.getLimit();
-    }
-}
-```
+Now U1 has history → choose **HybridRecommender**.
+UserHistoryRetriever adds items similar to C.
+WeightedFeatureRanker boosts category matches.
+Result might now be [C, D, A] instead of [A, B, C].
 
 ---
 
-## Key Design Decisions
+## 9. Design Decisions (Why It Is Built This Way)
 
-1. **Three-stage pipeline (Retrieve → Filter → Rank)** — Every recommender shares the
-   same shape. Interviewers can zoom into any one stage without redrawing the whole system.
-
-2. **Strategy pattern on `Recommender`** — `Popular`, `ContentBased`, and `Hybrid` are
-   interchangeable. `RecommendationService` only picks which one to call.
-
-3. **Separate read and write paths** — `EventIngestionService` handles writes;
-   `RecommendationService` is read-only. This mirrors real systems (Kafka → feature store,
-   API → cache).
-
-4. **Cold-start fallback** — If the user has no events, route to `PopularRecommender`.
-   This is a one-line policy in `selectRecommender` but shows product thinking.
-
-5. **Filters are composable** — For the LLD, one filter class is enough. In production you
-   would chain multiple filters (already seen → blocklist → age gate). Mention this in the
-   interview even if you only implement one.
-
-6. **Generic `Item`** — No `Video` or `Song` subclasses. Domain-specific fields belong in
-   `tags` or in a separate catalog service in production.
-
-7. **Plain Java for clarity** — Loops and `if-else` mirror how you would explain the logic
-   on a whiteboard. Optimizations (indexes, ANN search) come later.
-
-8. **Cache key includes `userId + category + limit`** — Different limits are different
-   responses; do not reuse a cache entry across them.
+| Decision | Reason |
+|----------|--------|
+| Three-step pipeline (Retrieve → Filter → Rank) | Every algorithm shares the same shape. Easy to understand and extend. |
+| Separate read and write paths | Getting recommendations should not accidentally change user data. |
+| Recommender as a strategy | Swap algorithms (popular, content, hybrid) without changing the entry point. |
+| Retriever / Filter / Ranker as separate interfaces | Each step can be replaced independently. |
+| Generic Item (no Video, Song subclasses) | Same design works for any domain. Extra details go in tags. |
+| Cold-start fallback to popular items | New users still get useful results on day one. |
+| Cache on RecommendationService | Same user asking twice within minutes should not recompute. |
+| EventIngestionService as single write entry | All validation happens in one place. |
 
 ---
 
-## Package Layout (For Your Implementation)
-
-```
-recommendationservice/
-├── DESIGN.md                          ← you are here
-├── RecommendationApplication.java     ← main() demo
-├── model/
-│   ├── Item.java
-│   ├── User.java
-│   ├── UserEvent.java
-│   ├── EventType.java
-│   ├── RecommendationRequest.java
-│   ├── RecommendationResponse.java
-│   └── ScoredItem.java
-├── service/
-│   ├── CatalogService.java
-│   ├── UserProfileService.java
-│   ├── EventIngestionService.java
-│   └── RecommendationService.java
-├── pipeline/
-│   ├── CandidateRetriever.java
-│   ├── RecommendationFilter.java
-│   └── Ranker.java
-├── retriever/
-│   ├── PopularItemsRetriever.java
-│   ├── UserHistoryRetriever.java
-│   └── CategoryBasedRetriever.java
-├── filter/
-│   ├── AlreadySeenFilter.java
-│   └── BlocklistFilter.java
-├── ranker/
-│   ├── PopularityRanker.java
-│   └── WeightedFeatureRanker.java
-├── recommender/
-│   ├── Recommender.java
-│   ├── PopularRecommender.java
-│   ├── ContentBasedRecommender.java
-│   └── HybridRecommender.java
-├── factory/
-│   └── RecommenderFactory.java
-└── cache/
-    └── RecommendationCache.java
-```
-
-### Suggested implementation order
-
-1. **Models** — `Item`, `User`, `UserEvent`, request/response classes.
-2. **CatalogService + UserProfileService** — seed demo data in constructors.
-3. **Pipeline interfaces** — `CandidateRetriever`, `RecommendationFilter`, `Ranker`.
-4. **One full path** — `PopularItemsRetriever` + `AlreadySeenFilter` + `PopularityRanker`
-   wired into `PopularRecommender`.
-5. **RecommendationService** — without cache first; add cache after the happy path works.
-6. **Hybrid + ContentBased** — add second retriever and weighted ranker.
-7. **EventIngestionService + Application** — record a LIKE, invalidate cache, fetch again.
-
----
-
-## How to Run (After You Implement)
-
-```bash
-cd recommendationservice
-javac -d out $(find . -name "*.java")
-java -cp out recommendationservice.RecommendationApplication
-```
-
-Expected demo output (example):
-
-```
-User u1 (cold start) → PopularRecommender → itemA, itemB, itemC
-Recorded LIKE on itemA for u1
-User u1 (warm)       → HybridRecommender  → itemD, itemB, itemA
-```
-
----
-
-## Glossary (Quick Reference for Interviews)
+## 10. Glossary
 
 | Term | Meaning |
 |------|---------|
-| **Candidate** | An item that might be recommended; not yet ranked. |
-| **Retriever** | Finds candidates quickly from catalog or user history. |
-| **Ranker** | Assigns a numeric score to each candidate. |
-| **Cold start** | New user/item with little or no interaction data. |
-| **Hybrid** | Combines two or more retrieval strategies before ranking. |
-| **Personalization** | Tailoring results to one user's preferences/history. |
-| **Impression** | Showing a recommendation to the user (track separately in production). |
+| **Candidate** | An item that might be recommended. Not yet scored or ranked. |
+| **Retrieve** | Find a large pool of possible items quickly. |
+| **Filter** | Remove items that must not be shown. |
+| **Rank** | Score remaining items and sort best-first. |
+| **Cold start** | A user (or item) with little or no history to learn from. |
+| **Personalization** | Tailoring results to one specific user. |
+| **Hybrid** | Combining results from more than one retriever before ranking. |
+| **Popularity score** | A precomputed number showing how popular an item is globally. |
+
+---
+
+## 11. Folder Structure (When You Implement)
+
+```
+recommendationservice/
+├── DESIGN.md
+├── RecommendationApplication.java
+├── model/           ← Item, User, UserEvent, Request, Response
+├── service/         ← CatalogService, UserProfileService, RecommendationService
+├── pipeline/        ← CandidateRetriever, RecommendationFilter, Ranker (interfaces)
+├── retriever/       ← PopularItemsRetriever, UserHistoryRetriever, ...
+├── filter/          ← AlreadySeenFilter, BlocklistFilter
+├── ranker/          ← PopularityRanker, WeightedFeatureRanker
+├── recommender/     ← PopularRecommender, ContentBasedRecommender, HybridRecommender
+├── factory/         ← RecommenderFactory
+└── cache/           ← RecommendationCache
+```
+
+**Suggested build order:**
+
+1. Models and data services (CatalogService, UserProfileService)
+2. Pipeline interfaces
+3. One complete path: PopularRecommender only
+4. RecommendationService
+5. Add Hybrid and ContentBased recommenders
+6. EventIngestionService and a demo application
